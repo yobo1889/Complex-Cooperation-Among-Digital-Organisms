@@ -1,0 +1,247 @@
+name: CI
+on:
+  push:
+    branches: [ master, dev ]
+  pull_request:
+    branches:
+      - '**'
+  schedule:
+    - cron: '0 0 * * 0'
+jobs:
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
+      - name: Push to DockerHub
+        uses: docker/build-push-action@v1
+        with:
+          push: true
+          tags: GITHUB_ACTION_${{ github.run_number }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: mmore500/conduit
+          add_git_labels: true
+
+
+  tidy:
+    name: Tidy
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --user root
+    steps:
+      - run: /opt/conduit/conduitpylib/test/run_tests.sh
+      - run: |
+          cd /opt/conduit
+          ./ci/test_tidy.sh
+
+  binder:
+    name: Notebooks
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --user root
+    steps:
+      # Adapted from https://askubuntu.com/a/524368
+      - run: cd /opt/conduit/binder && ./execute_notebooks.sh
+      - run: git init
+      - uses: fregante/setup-git-user@v1
+      - run: git commit --allow-empty -m "Initial commit"
+      - run: cp -r /opt/conduit/ deploy/
+      - uses: JamesIves/github-pages-deploy-action@4.0.0
+        with:
+          branch: binder # The branch the action should deploy to.
+          folder: deploy # The folder the action should deploy.
+      - run: mkdir -p deploy-artifacts/
+      - run: cp -r /opt/conduit/binder/. deploy-artifacts/binder/
+      # adapted from https://unix.stackexchange.com/a/107647
+      - run: find deploy-artifacts/binder/ -type f ! \( -name '*.csv' -o -name '*.png' -o -name '*.jpg' -o -name '*.pdf' -o -name '*.json' -o -name '*.meta' -o -name '*.txt' -o -name '*.out' -o -name '*.ipynb' \) -delete
+      # delete symlinks (Overleaf is not compatible with symlinks)
+      # adapted from https://superuser.com/a/586948
+      - run: find deploy-artifacts/binder -type l -delete
+      - uses: JamesIves/github-pages-deploy-action@4.0.0
+        with:
+          branch: binder-artifacts # The branch the action should deploy to.
+          folder: deploy-artifacts # The folder the action should deploy.
+
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    strategy:
+      matrix:
+        mpicxx: [mpich, openmpi]
+        mode: [ Debug, Opt ]
+      fail-fast: false
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --user=user --cap-add=SYS_ADMIN
+      env:
+        DISH_MPICXX: mpicxx.${{ matrix.mpicxx }}
+        OMPI_CXX: clang++
+    steps:
+      # undo github actions override of HOME to "/home/github/"
+      - run: |
+          export HOME="/home/user/"
+          cd /opt/conduit/
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=${{ matrix.mode }} -DMPI_EXECUTABLE_SUFFIX=.${{ matrix.mpicxx }}
+          cmake --build build
+          cd build
+          ctest
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --cap-add=SYS_ADMIN
+      env:
+        DISH_MPICXX: mpicxx.openmpi
+        OMPI_CXX: clang++
+        CC: clang
+        CXX: clang++
+        # env variables listed in https://codecov.io/env
+        GITHUB_HEAD_REF: ${{ github.head_ref }}
+        GITHUB_REF: ${{ github.ref }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_WORKFLOW: ${{ github.workflow }}
+    steps:
+      - run: |
+          cd /opt/conduit/
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Debug -DCODE_COVERAGE=ON
+          cmake --build build --target ccov-show-test-netuit
+          cmake --build build --target ccov-show-test-uit
+          cmake --build build --target ccov-show-test-uitsl
+          # adapted from https://docs.codecov.com/docs/codecov-uploader
+          curl -Os https://uploader.codecov.io/latest/linux/codecov
+          chmod +x codecov
+          ./codecov -t ${{ secrets.CODECOV_TOKEN }}
+          # @MAM 10-2021: running manually because
+          # codecov/codecov-action@v1 and @v2 don't work
+          # due to permissions errors
+
+  microbenchmarks:
+    name: Microbenchmarks
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --cap-add=SYS_ADMIN
+      env:
+        OSF_USERNAME: ${{ secrets.OSF_USERNAME }}
+        OSF_PASSWORD: ${{ secrets.OSF_PASSWORD }}
+        CONTEXT: actions
+    steps:
+      - run: |
+          cd /opt/conduit/microbenchmarks
+          make
+
+  macrobenchmarks:
+    name: Macrobenchmarks
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --cap-add=SYS_ADMIN
+      env:
+        OSF_USERNAME: ${{ secrets.OSF_USERNAME }}
+        OSF_PASSWORD: ${{ secrets.OSF_PASSWORD }}
+        CONTEXT: actions
+    steps:
+      - run: |
+          cd /opt/conduit/macrobenchmarks
+          make
+
+  docs:
+    name: Source, Docs, Demos
+    runs-on: ubuntu-20.04
+    needs:
+      - docker-build
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      # github actions requires root to access mounted volumes
+      options: --cap-add=SYS_ADMIN
+    steps:
+      # undo github actions override of HOME to "/home/github/"
+      - run: |
+          export HOME="/home/user/"
+          cd /opt/conduit
+          make test-source
+          make docs
+          make demos
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-20.04
+    container:
+      image: mmore500/conduit:GITHUB_ACTION_${{ github.run_number }}
+      env:
+        OSF_PASSWORD: ${{ secrets.OSF_PASSWORD }}
+        OSF_USERNAME: ${{ secrets.OSF_USERNAME }}
+      # github actions requires root to access mounted volumes
+      options: --user root
+    if: github.ref == 'refs/heads/master'
+    needs:
+      - binder
+      - coverage
+      - docs
+      - macrobenchmarks
+      - microbenchmarks
+      - tidy
+      - unit
+    steps:
+      - run: make -C /opt/conduit/ web
+      - run: cp -r /opt/conduit/web/ web/
+      - uses: JamesIves/github-pages-deploy-action@3.7.1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: gh-pages # The branch the action should deploy to.
+          FOLDER: web # The folder the action should deploy.
+          CLEAN: true # Automatically remove deleted files from the deploy branch
+
+  deploy-dockerhub:
+    name: Deploy to Dockerhub
+    runs-on: ubuntu-20.04
+    needs:
+      - binder
+      - coverage
+      - docs
+      - macrobenchmarks
+      - microbenchmarks
+      - tidy
+      - unit
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: 'recursive'
+      - name: Push to DockerHub
+        uses: docker/build-push-action@v1
+        with:
+          push: true
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: mmore500/conduit
+          tag_with_ref: true
+          tag_with_sha: true
