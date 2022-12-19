@@ -1,0 +1,2 @@
+g++ -O3 -DNDEBUG -msse4.2 -Wunused-command-line-argument -Wall -Wcomment -Wunused-private-field -Wno-unused-function -std=c++17 -Isignalgp-lite/third-party/Empirical/include/ -Isignalgp-lite/include/ native.cpp -o project_native
+./project_native
